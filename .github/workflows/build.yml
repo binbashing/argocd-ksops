@@ -1,23 +1,16 @@
 name: Build and Push Multi-Arch Image
 
 on:
-  push:
-    tags:
-      - "v*"
+  schedule:
+    - cron: "0 6 * * 1" # Weekly on Monday at 06:00 UTC
   workflow_dispatch:
     inputs:
       argocd_version:
-        description: "ArgoCD image version (e.g. v3.2.3)"
-        required: true
-        default: "v3.2.3"
+        description: "ArgoCD image version (e.g. v3.2.3). Leave empty for latest."
+        required: false
       ksops_version:
-        description: "KSOPS image version (e.g. v4.4.0)"
-        required: true
-        default: "v4.4.0"
-      kustomize_version:
-        description: "Kustomize version label (e.g. v5.0.0)"
-        required: true
-        default: "v5.0.0"
+        description: "KSOPS image version (e.g. v4.4.0). Leave empty for latest."
+        required: false
 
 env:
   REGISTRY: ghcr.io
@@ -36,19 +29,34 @@ jobs:
 
       - name: Resolve versions
         id: versions
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            ARGOCD_VERSION="${GITHUB_REF_NAME}"
-            KSOPS_VERSION="v4.4.0"
-            KUSTOMIZE_VERSION="v5.0.0"
-          else
+          if [ -n "${{ github.event.inputs.argocd_version }}" ]; then
             ARGOCD_VERSION="${{ github.event.inputs.argocd_version }}"
-            KSOPS_VERSION="${{ github.event.inputs.ksops_version }}"
-            KUSTOMIZE_VERSION="${{ github.event.inputs.kustomize_version }}"
+          else
+            ARGOCD_VERSION=$(gh api repos/argoproj/argo-cd/releases/latest --jq '.tag_name')
           fi
+
+          if [ -n "${{ github.event.inputs.ksops_version }}" ]; then
+            KSOPS_VERSION="${{ github.event.inputs.ksops_version }}"
+          else
+            KSOPS_VERSION=$(gh api repos/viaduct-ai/kustomize-sops/releases/latest --jq '.tag_name')
+          fi
+
           echo "argocd_version=${ARGOCD_VERSION}" >> "$GITHUB_OUTPUT"
           echo "ksops_version=${KSOPS_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "kustomize_version=${KUSTOMIZE_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "### Resolved versions" >> "$GITHUB_STEP_SUMMARY"
+          echo "- ArgoCD: ${ARGOCD_VERSION}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- KSOPS: ${KSOPS_VERSION}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify images exist
+        run: |
+          echo "Verifying quay.io/argoproj/argocd:${{ steps.versions.outputs.argocd_version }}..."
+          docker manifest inspect "quay.io/argoproj/argocd:${{ steps.versions.outputs.argocd_version }}" > /dev/null
+
+          echo "Verifying viaductoss/ksops:${{ steps.versions.outputs.ksops_version }}..."
+          docker manifest inspect "viaductoss/ksops:${{ steps.versions.outputs.ksops_version }}" > /dev/null
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -70,7 +78,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=${{ steps.versions.outputs.argocd_version }}
-            type=raw,value=latest,enable=${{ github.event_name == 'push' }}
+            type=raw,value=latest
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
@@ -83,6 +91,5 @@ jobs:
           build-args: |
             ARGOCD_VERSION=${{ steps.versions.outputs.argocd_version }}
             KSOPS_VERSION=${{ steps.versions.outputs.ksops_version }}
-            KUSTOMIZE_VERSION=${{ steps.versions.outputs.kustomize_version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
